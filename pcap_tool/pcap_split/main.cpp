@@ -1,0 +1,172 @@
+#include <iostream>
+#include <vector>
+#include <map>
+#include <set>
+#include <boost/program_options.hpp>
+#include <filesystem>
+
+#include "abstract_feature_extractor.h"
+#include "pcap_writer.h"
+#include "pcap_reader.h"
+#include "abstract_flow_identification.h"
+#include "ip_pair_flow_identification.h"
+#include "ip_pair_reverse_flow_identification.h"
+#include "five_tuple_flow_identification.h"
+#include "utils.h"
+
+namespace po = boost::program_options;
+
+int main(int argc, char *argv[]){
+    po::options_description desc("Allowed options");
+    desc.add_options()
+        ("help,h", "produce help message")
+        ("input,i", po::value<std::string>(), "set input file name")
+        ("output_dir,o", po::value<std::string>(), "set result directory")
+        ("flow_format,f", po::value<std::string>(), "set format for splitting flows, available options: ip_pair, ip_pair_reverse, five_tuple")
+        ("flow_packet_limit,l", po::value<int>(), "set the maximum number of packets for each flow")
+        ("flow_prefix,p", po::value<std::string>(), "set the prefix for the flow file name")
+        ;
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    if (vm.count("help")) {
+        std::cout << desc << "\n";
+        return 1;
+    }
+
+    std::string filename;
+    if (vm.count("input")) {
+        filename = vm["input"].as<std::string>();
+    } else {
+        std::cout << "Input filename was not set.\n";
+        return 1;
+    }
+
+    std::string result_dir;
+    if (vm.count("output_dir")) {
+        result_dir = vm["output_dir"].as<std::string>();
+        if (result_dir[result_dir.size() - 1] != '/')
+            result_dir += '/';
+        if (!std::filesystem::exists(result_dir)) {
+            std::filesystem::create_directories(result_dir);
+        }
+    } else {
+        std::cout << "Result directory was not set.\n";
+        return 1;
+    }
+
+    std::string flow_format;
+    if (vm.count("flow_format")) {
+        flow_format = vm["flow_format"].as<std::string>();
+    } else {
+        flow_format = "ip_pair";
+        std::cout << "Flow format was not set. Use default `ip_pair`\n";
+    }
+
+    int flow_packet_limit = -1;
+    if (vm.count("flow_packet_limit")) {
+        flow_packet_limit = vm["flow_packet_limit"].as<int>();
+        if (flow_packet_limit > 0) {
+            std::cout << "Warning: Flow packet limit is set to " << flow_packet_limit << std::endl;
+        }
+    }
+
+    std::string flow_prefix;
+    if (vm.count("flow_prefix")) {
+        flow_prefix = vm["flow_prefix"].as<std::string>();
+    } else {
+        flow_prefix = "";
+    }
+
+    PcapReader pcap_reader(filename.c_str(), false, false, true, false); // enable_original_pkt = true
+
+    std::map<std::string, PcapWriter*> pcap_writers;
+    std::map<std::string, int> flow_packet_count;
+    AbstractFlowIdentification<FiveTuple>* flow_identification;
+    if (flow_format == "ip_pair")
+        flow_identification = new IpPairFlowIdentification();
+    else if (flow_format == "ip_pair_reverse")
+        flow_identification = new IpPairReverseFlowIdentification();
+    else if (flow_format == "five_tuple")
+        flow_identification = new FiveTupleFlowIdentification();
+    else{
+        std::cout << "Flow format is not supported.\n";
+        return 1;
+    }
+
+    clock_t start_time = clock();
+    uint32_t pkt_cnt = 0;
+    int total_pkt_cnt = 0;
+
+    while(true){
+        if (clock() - start_time > CLOCKS_PER_SEC){
+            std::cout << "[# pkts in 1s] " << pkt_cnt << "  [total pkts] " << total_pkt_cnt << std::endl;
+            pkt_cnt = 0;
+            start_time = clock();
+        }
+        total_pkt_cnt++;
+        pkt_cnt++;
+
+        PktInfo pkt_info = pcap_reader.get_current_pkt_info();
+
+        std::string flow_str = flow_identification->dump_flow_id(pkt_info.flow_id, flow_prefix);
+        bool is_new_flow = false;
+
+        if (flow_packet_count.find(flow_str) == flow_packet_count.end()){
+            // neuer Flow
+            flow_packet_count[flow_str] = 1;
+            is_new_flow = true;
+        } else if (flow_packet_limit > 0 && flow_packet_count[flow_str] >= flow_packet_limit) {
+            // Limit bereits erreicht — Paket überspringen, Writer bereits geschlossen
+            pcap_reader.generate_next();
+            if(pcap_reader.is_end())
+                break;
+            continue;
+        } else {
+            flow_packet_count[flow_str]++;
+        }
+
+        // Writer öffnen falls noch nicht vorhanden
+        if (pcap_writers.find(flow_str) == pcap_writers.end()){
+           // LRU: erst aufräumen wenn zu viele Writer offen
+           if (pcap_writers.size() >= 50000) {
+               int cnt = 0;
+               for (auto it = pcap_writers.begin(); it != pcap_writers.end() && cnt < 10000;) {
+                   it->second->close_dump_file();
+                   delete it->second;
+                   it = pcap_writers.erase(it);
+                   cnt++;
+               }
+               std::cout << "[LRU] Closed 10000 writers, remaining: " << pcap_writers.size() << std::endl;
+           }
+           std::string cooked_filename = result_dir + flow_str + ".pcap";
+           int data_link_type = pcap_reader.get_data_link_type();
+           PcapWriter *ptr = new PcapWriter(cooked_filename.c_str(), 500, is_new_flow, data_link_type);
+           pcap_writers[flow_str] = ptr;
+        }
+
+        // Paket schreiben
+        u_char pkt_content[10000] = {};
+        pcap_pkthdr pkt_header = pcap_pkthdr();
+        pcap_reader.get_curr_original_pkt(pkt_content, &pkt_header);
+        pcap_writers[flow_str]->dump_original_pkt(pkt_content, &pkt_header);
+
+        // *** FIX: Writer sofort schließen wenn das letzte erlaubte Paket geschrieben wurde ***
+        if (flow_packet_limit > 0 && flow_packet_count[flow_str] >= flow_packet_limit){
+            pcap_writers[flow_str]->close_dump_file();
+            delete pcap_writers[flow_str];
+            pcap_writers.erase(flow_str);
+        }
+    }
+
+    // Alle noch offenen Writer schließen (Flows die das Limit nicht erreicht haben)
+    for (auto& kv : pcap_writers){
+        kv.second->close_dump_file();
+        delete kv.second;
+    }
+    pcap_writers.clear();
+
+    return 0;
+}

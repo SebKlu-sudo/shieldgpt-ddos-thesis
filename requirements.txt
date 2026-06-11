@@ -1,0 +1,29 @@
+# Core ML
+torch==1.13.0+cu117
+torchvision==0.14.0+cu117
+timm==0.3.2
+transformers==4.35.0
+safetensors==0.4.2
+
+# Data processing
+numpy==1.26.3
+pandas==2.2.0
+scikit-learn==1.4.0
+scikit-image==0.22.0
+scipy==1.11.4
+pillow==10.2.0
+
+# Network / PCAP
+scapy==2.5.0
+
+# LLM API
+openai==1.9.0
+httpx==0.26.0
+
+# Utilities
+tqdm==4.66.1
+matplotlib==3.8.2
+huggingface-hub==0.17.3
+tensorboard==2.15.1
+PyYAML==6.0.1
+requests==2.31.0
