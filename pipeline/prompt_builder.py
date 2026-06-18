@@ -1,42 +1,42 @@
 """
 prompt_builder.py
 Builds the LLM prompt from a feature digest dict.
- 
+
 Called by pipeline.py:
     digest = generate_digest(pcap_path)
     digest["yatc_label"] = label
     digest["yatc_score"] = score
     prompt = build_prompt(digest)
- 
+
 Returns a ready-to-submit prompt string.
 """
- 
+
 from attack_descriptions import ATTACK_DICT, SYSTEM_PROMPT
- 
- 
+
+
 def build_prompt(digest: dict) -> str:
     """
     Build a complete LLM prompt from a feature digest dict.
- 
+
     Parameters
     ----------
     digest : dict
         Output from generate_digest() with yatc_label and yatc_score appended.
- 
+
     Returns
     -------
     str : ready-to-submit prompt string
     """
     label = digest.get("yatc_label", "unknown")
     score = digest.get("yatc_score", 0.0)
- 
+
     attack_info = ATTACK_DICT.get(label, {
         "name":        label,
         "description": f"a {label} attack.",
     })
- 
+
     traffic_text = _format_features(digest, attack_info, score)
- 
+
     prompt_lines = [
         traffic_text,
         "",
@@ -45,24 +45,37 @@ def build_prompt(digest: dict) -> str:
         f"why it is indicative of a {attack_info['name']} attack.",
         "",
         "Step 2 - Mitigation:",
-        "Write a Snort 3 rule that detects and blocks this specific attack "
-        "based on the traffic characteristics above. The rule must include: "
-        "action, protocol, src/dst IP/port, msg, sid, rev. Use "
-        "detection_filter for rate-based detection where appropriate. "
+        "Write a Snort 3 IPS rule that detects this specific attack based on "
+        "the traffic characteristics above. The rule must include: "
+        "action, protocol, src/dst IP/port, msg, sid, rev. "
         "Use $HOME_NET for the victim address. For the attacker address, "
         "use the specific source IP from the traffic profile if available, "
-        "otherwise use $EXTERNAL_NET.",
+        "otherwise use $EXTERNAL_NET. "
+        "Use detection_filter for rate-based detection where appropriate: "
+        "detection_filter:track by_src, count X, seconds Y. "
+        "IMPORTANT: Use only Snort 3 compatible syntax. "
+        "Do NOT use the following deprecated Snort 2 keywords: threshold, "
+        "byte_test, classtype, metadata. "
+        "In Snort 3, rate-based detection is done exclusively with "
+        "detection_filter, NOT threshold. "
+        "If you use content matching, you MUST use Snort 3 comma syntax: "
+        "content:\"|30|\", offset 0, depth 1; "
+        "NEVER write: content:\"|30|\"; offset:0; depth:1; "
+        "The colon after offset and depth is WRONG in Snort 3. "
+        "The semicolon after content before offset is WRONG in Snort 3. "
+        "CORRECT:   content:\"|30|\", offset 0, depth 1; "
+        "INCORRECT: content:\"|30|\"; offset:0; depth:1; ",
         "Separate Step 1 and Step 2 with the delimiter: ---RULES---",
     ]
- 
+
     return "\n".join(prompt_lines)
- 
- 
+
+
 def _format_features(digest: dict,
                      attack_info: dict,
                      yatc_score: float) -> str:
     """Format digest dict into natural language traffic description."""
- 
+
     lines = [
         f"The following are traffic statistical characteristics of "
         f"{attack_info['description']}",
@@ -93,7 +106,7 @@ def _format_features(digest: dict,
         f"RST flag count          : {digest.get('rst_flag_count', 0)}",
         f"FIN flag count          : {digest.get('fin_flag_count', 0)}",
     ]
- 
+
     # Per-packet details (first 3)
     packet_info = digest.get("packet_info", [])
     if packet_info:
@@ -106,10 +119,10 @@ def _format_features(digest: dict,
                 f"flags={pkt.get('tcp_flags', '-')}  "
                 f"window={pkt.get('tcp_window_size', '-')}"
             )
- 
+
     return "\n".join(lines)
- 
- 
+
+
 def _fmt(d: dict, key: str, decimals: int = 2) -> str:
     """Format a float from digest dict safely."""
     val = d.get(key)
@@ -119,8 +132,8 @@ def _fmt(d: dict, key: str, decimals: int = 2) -> str:
         return f"{float(val):.{decimals}f}"
     except (ValueError, TypeError):
         return str(val)
- 
- 
+
+
 # ── Standalone test ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # Quick test with dummy digest
