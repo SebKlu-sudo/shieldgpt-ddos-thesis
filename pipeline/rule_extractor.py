@@ -1,9 +1,9 @@
 """
 rule_extractor.py
 Parses the raw LLM response into structured fields.
-Extracts Snort 3 rules as a list for rule_validator.py and rule_deployer.py
+Extracts Snort 3 rules as a list — handles single-line and multi-line rules.
 
-Used by pipeline.py:
+Used by pipeline.py and run_ddos2019.py:
     from rule_extractor import extract_rules
 """
 
@@ -37,7 +37,6 @@ def extract_rules(response: str) -> dict:
     snort_rules = _extract_snort_rules(rules)
     rule_type   = "snort" if snort_rules else "unknown"
 
-    # valid only if delimiter present AND at least one Snort rule found
     if valid and not snort_rules:
         valid = False
 
@@ -51,26 +50,32 @@ def extract_rules(response: str) -> dict:
 
 
 def _extract_snort_rules(text: str) -> list[str]:
-    """Extract lines that look like Snort rules."""
-    lines = []
+    """Extract Snort rules — handles both single-line and multi-line rules."""
+    lines        = []
+    current_rule = ""
+    in_rule      = False
+
     for line in text.splitlines():
-        line = line.strip()
-        if re.match(r"^(alert|drop|reject|pass)\s+", line):
-            lines.append(line)
+        line_stripped = line.strip()
+
+        if re.match(r"^(alert|drop|reject|pass)\s+", line_stripped):
+            if current_rule:
+                lines.append(current_rule.strip())
+            current_rule = line_stripped
+            in_rule      = True
+            if line_stripped.endswith(")") or line_stripped.endswith(";)"):
+                lines.append(current_rule.strip())
+                current_rule = ""
+                in_rule      = False
+
+        elif in_rule:
+            current_rule += " " + line_stripped
+            if line_stripped.endswith(")") or line_stripped.endswith(";)"):
+                lines.append(current_rule.strip())
+                current_rule = ""
+                in_rule      = False
+
+    if current_rule:
+        lines.append(current_rule.strip())
+
     return lines
-
-
-# ── Quick self-test ───────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    sample = """
-The traffic profile indicates a SYN Flood attack.
----RULES---
-alert tcp 172.16.0.5 any -> $HOME_NET any (msg:"SYN Flood"; flags:S,12; detection_filter:track by_src,count 1000,seconds 1; sid:9000001; rev:1;)
-alert tcp 172.16.0.5 any -> $HOME_NET any (msg:"SYN Flood rate"; detection_filter:track by_src,count 5000,seconds 5; sid:9000002; rev:1;)
-"""
-    result = extract_rules(sample)
-    print(f"valid       : {result['valid']}")
-    print(f"rule_type   : {result['rule_type']}")
-    print(f"snort_rules : {result['snort_rules']}")
-    print(f"analysis    : {result['analysis'][:60]}...")

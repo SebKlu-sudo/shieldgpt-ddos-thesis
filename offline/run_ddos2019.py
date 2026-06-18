@@ -1,8 +1,7 @@
 """
 run_ddos2019.py
 Submits prompts from gen_prompt_ddos2019.py to GPT-4o.
-Parses responses into analysis + rules sections.
-Detects Snort 3 rule validity.
+Parses responses via rule_extractor and validates via rule_validator.
 Logs all evaluation metrics.
 """
 
@@ -14,6 +13,8 @@ from openai import OpenAI
 from tqdm import tqdm
 
 from attack_descriptions import SYSTEM_PROMPT
+from rule_extractor import extract_rules
+from rule_validator import validate_rules
 
 client = OpenAI()  # uses OPENAI_API_KEY env variable
 
@@ -36,43 +37,6 @@ def gpt_generate(prompt: str, model: str = "gpt-4o",
     return response.choices[0].message.content, latency
 
 
-def extract_rules(response: str) -> dict:
-    """
-    Split response at ---RULES--- delimiter.
-    Detect rule types: snort / iptables / sysctl / combined.
-    """
-    delimiter = "---RULES---"
-    if delimiter in response:
-        parts    = response.split(delimiter, 1)
-        analysis = parts[0].strip()
-        rules    = parts[1].strip()
-        valid    = True
-    else:
-        analysis = ""
-        rules    = response.strip()
-        valid    = False
-
-    # Detect rule types — Snort only
-    rule_types  = []
-    rules_lower = rules.lower()
-    if ("alert " in rules_lower or
-            "drop "    in rules_lower or
-            "sid:"     in rules_lower or
-            "msg:"     in rules_lower or
-            "content:" in rules_lower or
-            "dsize:"   in rules_lower):
-        rule_types.append("snort")
-    if not rule_types:
-        rule_types.append("unknown")
-
-    return {
-        "analysis":  analysis,
-        "rules":     rules,
-        "valid":     valid,
-        "rule_type": "+".join(rule_types),
-    }
-
-
 def run_pipeline(input_csv: str, output_dir: str, model: str = "gpt-4o"):
     """Run inference pipeline on all prompts in input_csv."""
     print(f"[INFO] Model      : {model}")
@@ -92,7 +56,17 @@ def run_pipeline(input_csv: str, output_dir: str, model: str = "gpt-4o"):
         t_generate_end   = time.time()
         total_latency   += latency
 
+        # Step 1: Extract rules via rule_extractor
         parsed = extract_rules(response)
+
+        # Step 2: Validate extracted Snort rules via rule_validator
+        if parsed["valid"] and parsed["snort_rules"]:
+            validation = validate_rules(parsed["snort_rules"])
+            rule_valid  = validation["valid"]
+            val_errors  = validation["errors"]
+        else:
+            rule_valid = False
+            val_errors = ["No valid Snort rules extracted"]
 
         results.append({
             "prompt":           row["prompt"],
@@ -101,8 +75,12 @@ def run_pipeline(input_csv: str, output_dir: str, model: str = "gpt-4o"):
             "response":         response,
             "analysis":         parsed["analysis"],
             "rules":            parsed["rules"],
+            "snort_rules":      "\n".join(parsed["snort_rules"]),
+            "n_rules":          len(parsed["snort_rules"]),
             "valid":            parsed["valid"],
             "rule_type":        parsed["rule_type"],
+            "rule_valid":       rule_valid,
+            "val_errors":       "; ".join(val_errors) if val_errors else "",
             "latency_s":        round(latency, 3),
             "t_generate_start": t_generate_start,
             "t_generate_end":   t_generate_end,
@@ -114,19 +92,24 @@ def run_pipeline(input_csv: str, output_dir: str, model: str = "gpt-4o"):
     out_df.to_csv(out_path, index=False)
 
     # Summary
-    valid_count   = out_df["valid"].sum()
-    invalid_count = len(out_df) - valid_count
-    avg_latency   = total_latency / len(out_df)
+    valid_count      = out_df["valid"].sum()
+    rule_valid_count = out_df["rule_valid"].sum()
+    invalid_count    = len(out_df) - valid_count
+    avg_latency      = total_latency / len(out_df)
 
     print(f"\n[DONE] Results saved to {out_path}")
-    print(f"       Total prompts          : {len(out_df)}")
-    print(f"       Valid (with ---RULES---): {valid_count}")
-    print(f"       Invalid / empty        : {invalid_count}")
-    print(f"       Avg LLM latency        : {avg_latency:.2f}s")
+    print(f"       Total prompts            : {len(out_df)}")
+    print(f"       Valid (---RULES--- found): {valid_count}")
+    print(f"       Syntactically valid rules: {rule_valid_count}")
+    print(f"       Invalid / empty          : {invalid_count}")
+    print(f"       Rule validity rate       : {rule_valid_count/len(out_df)*100:.1f}%")
+    print(f"       Avg LLM latency          : {avg_latency:.2f}s")
     print("\nRule type distribution:")
     print(out_df.groupby(["label", "rule_type"]).size().to_string())
-    print("\nPer-attack validity:")
-    print(out_df.groupby("label")["valid"].sum().to_string())
+    print("\nPer-attack rule validity:")
+    print(out_df.groupby("label")["rule_valid"].sum().to_string())
+    print("\nPer-attack avg latency:")
+    print(out_df.groupby("label")["latency_s"].mean().round(2).to_string())
 
     return out_df
 
