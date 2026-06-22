@@ -10,11 +10,12 @@ Two modes:
 
 Architecture:
     klusids (10.34.0.28):
-        tcpreplay -i ens160 --dstipmap 0.0.0.0/0:10.34.0.28
+        attacked one
         Snort 3 IPS on ens160 → alert_fast.txt
 
     kllums (10.34.0.29, this script):
         online mode:
+            tcpreplay -i ens160 --dstipmap 0.0.0.0/0:10.34.0.28
             scapy.sniff() on ens160
             → per-flow PCAPs (6 packets) → yatc_online.classify_flow()
             → LLM → rule_deployer → SSH → klusids
